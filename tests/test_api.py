@@ -40,6 +40,23 @@ def test_health(http, api_module):
         assert http.get("/health").status_code == 503
 
 
+def test_interactive_docs_describe_response_shapes(http):
+    response = http.get("/openapi.json")
+    assert response.status_code == 200
+    spec = response.json()
+    for path in spec["paths"].values():
+        for operation in path.values():
+            for code, result in operation["responses"].items():
+                if code.startswith("2"):
+                    schema = result["content"]["application/json"]["schema"]
+                    model = spec["components"]["schemas"][schema["$ref"].rsplit("/", 1)[-1]]
+                    assert model["type"] == "object" and model["required"]
+    models = spec["components"]["schemas"]
+    assert models["Employee"]["properties"]["created_at"]["type"] == "integer"
+    assert models["AttendanceRecord"]["properties"]["history"]["type"] == "array"
+    assert "moving_avg_7d" in models["TrendItem"]["required"]
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -59,6 +76,9 @@ def test_health(http, api_module):
         ("shift_end", "09:30"),
         ("name", 1),
         ("joined_on", "0000-01-01"),
+        ("emp_code", "EMP\u0661\u0662\u0663\u0664"),
+        ("shift_start", "0\u0669:3\u0660"),
+        ("shift_end", "18:3\u0660"),
     ],
 )
 def test_employee_validation(http, field, value):
@@ -170,6 +190,35 @@ def test_overnight(http):
     )
     assert r.status_code == 200 and r.json()["overtime_minutes"] == 40
     assert punch(http, day="2026-07-07", clock="06:00:00").json()["date"] == "2026-07-07"
+
+
+def test_punch_out_preserves_seeded_lateness(http, api_module):
+    employee(http)
+    pin = datetime.fromtimestamp(ms("2026-07-06", "09:30:00") / 1000, timezone.utc)
+    api_module.db.attendance_logs.insert_one(
+        {
+            "emp_code": "EMP0001",
+            "date": "2026-07-06",
+            "status": "PRESENT",
+            "punch_in": pin,
+            "punch_out": None,
+            "work_hours": None,
+            "late_minutes": 37,
+            "overtime_minutes": 0,
+            "half_day": False,
+            "history": [],
+        }
+    )
+    response = http.post(
+        "/attendance/punch-out",
+        json={
+            "emp_code": "EMP0001",
+            "punched_at": ms("2026-07-06", "18:30:00"),
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["late_minutes"] == 37
+    assert response.json()["work_hours"] == 9.0
 
 
 def test_ist_calendar_differs_from_utc(http):

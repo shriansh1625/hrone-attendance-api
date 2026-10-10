@@ -19,7 +19,7 @@ $env:MONGO_DB = "attendance_db"
 
 Use an existing MongoDB server, Atlas, or `docker run --rm -p 127.0.0.1:27017:27017 mongo:7`. Indexes are created automatically; startup does not seed, clear or modify attendance data. `/health` checks MongoDB readiness; `/docs` provides interactive API documentation.
 
-All endpoints are implemented. Stored derived fields are used for analytics; manual changes append an audit entry and concurrent stale writes return 409. Calendar expansion and moving averages run in MongoDB. No authentication is added to this assignment; keep a running instance local. Application code makes no network calls except to MongoDB.
+All endpoints are implemented, with response schemas in `/docs`. Stored derived fields are used for analytics; punch-out preserves stored lateness, manual changes append an audit entry, and concurrent stale writes return 409. Calendar expansion and moving averages run in MongoDB. Monthly percentages use two decimal places; fractional trend rates use four (see the interpretation in `VALIDATION.md`). No authentication is added to this assignment; keep a running instance local. Application code makes no network calls except to MongoDB.
 
 ```sh
 pip install -r requirements-dev.txt
@@ -27,4 +27,4 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-Tests create and remove their own randomly named database. They cover boundary rules, concurrent requests, seeded legacy shapes, ties, no-log employees, joiners, randomized analytics against independent reference calculations, and explain plans. See `VALIDATION.md` for the measured 100,000-record run and `REVIEW.md` / `DECISIONS.md` for the review and design rationale.
+Tests create and remove their own randomly named database. They cover boundary rules, concurrent requests, seeded legacy shapes, ties, no-log employees, joiners, randomized analytics against separately implemented reference calculations, and explain plans. GitHub Actions runs them on Python 3.11 with MongoDB 6 and 7. See `VALIDATION.md` for the 100,000-record benchmarks, audit findings and limitations, and `REVIEW.md` / `DECISIONS.md` for the review and design rationale.

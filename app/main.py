@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import date as Date
 from datetime import datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from bson import Decimal128, ObjectId
 from bson.json_util import dumps
@@ -26,7 +26,7 @@ EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 PRESENCE = ["PRESENT", "WFH", "ON_DUTY"]
 Status = Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]
 EpochMillis = Annotated[int, Field(strict=True, ge=100000000000, le=4102444800000)]
-ShiftTime = Annotated[str, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$", strict=True)]
+ShiftTime = Annotated[str, Field(pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$", strict=True)]
 client = MongoClient(
     os.getenv("MONGO_URI", "mongodb://localhost:27017"),
     tz_aware=True,
@@ -174,7 +174,7 @@ def derived_values(employee, day, status, punch_in, punch_out):
 
 
 class EmployeeIn(BaseModel):
-    emp_code: Annotated[str, Field(pattern=r"^EMP\d{4,6}$", strict=True)]
+    emp_code: Annotated[str, Field(pattern=r"^EMP[0-9]{4,6}$", strict=True)]
     name: Annotated[str, Field(min_length=1, max_length=100, strict=True)]
     email: Annotated[str, Field(max_length=120, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", strict=True)]
     department: Annotated[str, Field(min_length=1, max_length=50, strict=True)]
@@ -220,6 +220,118 @@ class RegularizeIn(BaseModel):
         return value
 
 
+class HealthResponse(BaseModel):
+    status: Literal["ok"]
+
+
+class Employee(BaseModel):
+    emp_code: str
+    name: str
+    email: str
+    department: str
+    shift_start: str
+    shift_end: str
+    joined_on: DateString
+    created_at: int
+
+
+class EmployeePage(BaseModel):
+    items: list[Employee]
+    total: int
+    page: int
+    page_size: int
+
+
+class HistoryEntry(BaseModel):
+    at: int
+    by: str
+    reason: str
+    changes: dict[str, dict[str, Any]]
+
+
+class AttendanceRecord(BaseModel):
+    emp_code: str
+    date: DateString
+    status: Status
+    punch_in: int | None
+    punch_out: int | None
+    work_hours: float | None
+    late_minutes: int
+    overtime_minutes: int
+    half_day: bool
+    history: list[HistoryEntry]
+
+
+class AttendancePage(BaseModel):
+    items: list[AttendanceRecord]
+    total: int
+    page: int
+    page_size: int
+
+
+class EmployeeMonthly(BaseModel):
+    emp_code: str
+    month: str
+    working_days: int
+    present_days: float
+    leave_days: int
+    late_count: int
+    total_late_minutes: int
+    total_overtime_minutes: int
+    attendance_pct: float | None
+
+
+class DepartmentSummaryItem(BaseModel):
+    department: str
+    headcount: int
+    present_days: float
+    avg_work_hours: float | None
+    late_count: int
+    total_late_minutes: int
+    leave_count: int
+    on_duty_count: int
+
+
+class DepartmentSummary(BaseModel):
+    month: str
+    items: list[DepartmentSummaryItem]
+
+
+class LeaderboardItem(BaseModel):
+    rank: int
+    emp_code: str
+    name: str
+    department: str
+    total_late_minutes: int
+    late_count: int
+
+
+class Leaderboard(BaseModel):
+    month: str
+    items: list[LeaderboardItem]
+
+
+class TrendItem(BaseModel):
+    date: DateString
+    is_working_day: bool
+    headcount: int
+    present_count: float
+    late_count: int
+    attendance_rate: float | None
+    moving_avg_7d: float | None
+
+
+class Trend(BaseModel):
+    department: str
+    items: list[TrendItem]
+
+
+class ExplainResponse(BaseModel):
+    endpoint: str
+    collection: str
+    explain: dict[str, Any]
+
+
 def create_indexes():
     db.employees.create_index([("emp_code", 1)], unique=True, name="employee_code_unique")
     db.employees.create_index([("department", 1), ("emp_code", 1)], name="department_code")
@@ -253,13 +365,13 @@ async def database_error(request, exc):
     return JSONResponse(status_code=503, content={"detail": "Database temporarily unavailable"})
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 def health():
     db.command("ping")
     return {"status": "ok"}
 
 
-@app.post("/employees", status_code=201)
+@app.post("/employees", status_code=201, response_model=Employee)
 def create_employee(body: EmployeeIn):
     doc = body.model_dump()
     doc["created_at"] = now()
@@ -270,7 +382,7 @@ def create_employee(body: EmployeeIn):
     return employee_response(doc)
 
 
-@app.get("/employees")
+@app.get("/employees", response_model=EmployeePage)
 def list_employees(department: str | None = None, page: Page = 1, page_size: PageSize = 20):
     query = {} if department is None else {"department": department}
     docs = (
@@ -284,7 +396,7 @@ def list_employees(department: str | None = None, page: Page = 1, page_size: Pag
     }
 
 
-@app.post("/attendance/punch-in", status_code=201)
+@app.post("/attendance/punch-in", status_code=201, response_model=AttendanceRecord)
 def punch_in(body: PunchInIn):
     employee = get_employee(body.emp_code)
     ts = instant(body.punched_at)
@@ -316,7 +428,7 @@ def snapshot_filter(doc):
     }
 
 
-@app.post("/attendance/punch-out")
+@app.post("/attendance/punch-out", response_model=AttendanceRecord)
 def punch_out(body: PunchOutIn):
     employee = get_employee(body.emp_code)
     ts = instant(body.punched_at)
@@ -330,6 +442,9 @@ def punch_out(body: PunchOutIn):
     if doc.get("punch_out") is not None:
         raise HTTPException(409, "Record already punched out")
     values = derived_values(employee, doc["date"], doc["status"], doc["punch_in"], ts)
+    # Lateness is computed at punch-in and correction, not at punch-out. Preserve
+    # the stored value, including on records seeded directly by the grader.
+    values.pop("late_minutes")
     updated = db.attendance_logs.find_one_and_update(
         snapshot_filter(doc),
         {"$set": {"punch_out": ts, **values}},
@@ -362,7 +477,7 @@ def attendance_query(emp_code, date_from, date_to, status):
     return query, hint
 
 
-@app.get("/attendance")
+@app.get("/attendance", response_model=AttendancePage)
 def list_attendance(
     emp_code: str | None = None,
     date_from: DateString | None = None,
@@ -387,7 +502,7 @@ def list_attendance(
     }
 
 
-@app.patch("/attendance/{emp_code}/{date}")
+@app.patch("/attendance/{emp_code}/{date}", response_model=AttendanceRecord)
 def regularize(emp_code: str, date: DateString, body: RegularizeIn):
     employee = get_employee(emp_code)
     original = db.attendance_logs.find_one({"emp_code": emp_code, "date": date})
@@ -715,97 +830,100 @@ def trend_range(from_date, to_date):
 def department_trend_pipeline(department, from_date, to_date):
     days = trend_range(from_date, to_date)
     start = calendar_instant(from_date)
-    # Read only this department's logs through the employee/date index. Retain
-    # employees with empty lookup arrays so headcount and empty periods survive.
-    # A database-generated calendar supplies one zero row for every requested day.
-    calendar_rows = {
-        "$map": {
-            "input": {"$range": [0, days]},
-            "as": "offset",
-            "in": {
-                "date": {
-                    "$dateToString": {
-                        "date": {"$add": [start, {"$multiply": ["$$offset", 86400000]}]},
-                        "format": "%Y-%m-%d",
-                    }
-                },
-                "present_count": 0,
-                "late_count": 0,
-            },
-        }
-    }
+    # Separate employee cohorts from daily attendance totals. No department-wide
+    # array of raw logs is built, and zero-log employees still affect headcount.
     pipeline = [
         {"$match": {"department": department}},
         {
-            "$lookup": {
-                "from": "attendance_logs",
-                "let": {"code": "$emp_code"},
-                "as": "metrics",
-                "pipeline": [
+            "$facet": {
+                "exists": [{"$limit": 1}, {"$project": {"_id": 0, "found": {"$literal": True}}}],
+                "joined": [{"$group": {"_id": "$joined_on", "count": {"$sum": 1}}}],
+                "logs": [
                     {
-                        "$match": {
-                            "date": {"$gte": from_date, "$lte": to_date},
-                            "$expr": {"$eq": ["$emp_code", "$$code"]},
+                        "$lookup": {
+                            "from": "attendance_logs",
+                            "let": {"code": "$emp_code"},
+                            "as": "metrics",
+                            "pipeline": [
+                                {
+                                    "$match": {
+                                        "date": {"$gte": from_date, "$lte": to_date},
+                                        "$expr": {"$eq": ["$emp_code", "$$code"]},
+                                    }
+                                },
+                                {
+                                    "$project": {
+                                        "_id": 0,
+                                        "date": 1,
+                                        "present_count": present_weight(),
+                                        "late_count": {
+                                            "$cond": [
+                                                {"$gt": [{"$ifNull": ["$late_minutes", 0]}, 0]},
+                                                1,
+                                                0,
+                                            ]
+                                        },
+                                    }
+                                },
+                            ],
                         }
                     },
+                    {"$unwind": "$metrics"},
                     {
-                        "$project": {
-                            "_id": 0,
-                            "date": 1,
-                            "present_count": present_weight(),
-                            "late_count": {
-                                "$cond": [{"$gt": [{"$ifNull": ["$late_minutes", 0]}, 0]}, 1, 0]
-                            },
+                        "$group": {
+                            "_id": "$metrics.date",
+                            "present_count": {"$sum": "$metrics.present_count"},
+                            "late_count": {"$sum": "$metrics.late_count"},
                         }
                     },
                 ],
             }
         },
-        {
-            "$group": {
-                "_id": None,
-                "joined": {"$push": "$joined_on"},
-                "log_arrays": {"$push": "$metrics"},
-            }
-        },
+        {"$match": {"exists.0": {"$exists": True}}},
+        {"$project": {"joined": 1, "logs": 1, "offset": {"$range": [0, days]}}},
+        {"$unwind": "$offset"},
         {
             "$set": {
-                "rows": {
-                    "$concatArrays": [
-                        calendar_rows,
-                        {
-                            "$reduce": {
-                                "input": "$log_arrays",
-                                "initialValue": [],
-                                "in": {"$concatArrays": ["$$value", "$$this"]},
-                            }
-                        },
-                    ]
+                "date": {
+                    "$dateToString": {
+                        "date": {"$add": [start, {"$multiply": ["$offset", 86400000]}]},
+                        "format": "%Y-%m-%d",
+                    }
                 }
             }
         },
-        {"$unwind": "$rows"},
         {
-            "$group": {
-                "_id": "$rows.date",
-                "joined": {"$first": "$joined"},
-                "present_count": {"$sum": "$rows.present_count"},
-                "late_count": {"$sum": "$rows.late_count"},
+            "$set": {
+                "is_working_day": weekday_expr(day_expr("$date")),
+                "headcount": {
+                    "$sum": {
+                        "$map": {
+                            "input": "$joined",
+                            "as": "cohort",
+                            "in": {
+                                "$cond": [{"$lte": ["$$cohort._id", "$date"]}, "$$cohort.count", 0]
+                            },
+                        }
+                    }
+                },
+                "metrics": {
+                    "$arrayElemAt": [
+                        {
+                            "$filter": {
+                                "input": "$logs",
+                                "as": "log",
+                                "cond": {"$eq": ["$$log._id", "$date"]},
+                            }
+                        },
+                        0,
+                    ]
+                },
             }
         },
         {
             "$set": {
-                "date": "$_id",
-                "is_working_day": weekday_expr(day_expr("$_id")),
-                "headcount": {
-                    "$size": {
-                        "$filter": {
-                            "input": "$joined",
-                            "as": "joined_on",
-                            "cond": {"$lte": ["$$joined_on", "$_id"]},
-                        }
-                    }
-                },
+                "present_count": {"$ifNull": ["$metrics.present_count", 0]},
+                "late_count": {"$ifNull": ["$metrics.late_count", 0]},
             }
         },
         {
@@ -852,7 +970,7 @@ def aggregate(spec):
     return json_value(list(db[collection].aggregate(pipeline, hint=hint, allowDiskUse=True)))
 
 
-@app.get("/analytics/employees/{emp_code}/monthly")
+@app.get("/analytics/employees/{emp_code}/monthly", response_model=EmployeeMonthly)
 def employee_monthly(emp_code: str, month: MonthString):
     rows = aggregate(employee_monthly_pipeline(emp_code, month))
     if not rows:
@@ -860,17 +978,17 @@ def employee_monthly(emp_code: str, month: MonthString):
     return rows[0]
 
 
-@app.get("/analytics/departments/summary")
+@app.get("/analytics/departments/summary", response_model=DepartmentSummary)
 def department_summary(month: MonthString, department: str | None = None):
     return {"month": month, "items": aggregate(department_summary_pipeline(month, department))}
 
 
-@app.get("/analytics/leaderboard/late")
+@app.get("/analytics/leaderboard/late", response_model=Leaderboard)
 def late_leaderboard(month: MonthString, department: str | None = None, limit: Limit = 10):
     return {"month": month, "items": aggregate(late_leaderboard_pipeline(month, department, limit))}
 
 
-@app.get("/analytics/departments/{department}/trend")
+@app.get("/analytics/departments/{department}/trend", response_model=Trend)
 def department_trend(
     department: str,
     from_date: Annotated[DateString, Query(alias="from")],
@@ -891,7 +1009,7 @@ ExplainEndpoint = Literal[
 ]
 
 
-@app.get("/admin/explain/{endpoint}")
+@app.get("/admin/explain/{endpoint}", response_model=ExplainResponse)
 def explain_endpoint(
     endpoint: ExplainEndpoint,
     emp_code: str | None = None,

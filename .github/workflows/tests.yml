@@ -6,10 +6,15 @@ permissions:
   contents: read
 jobs:
   tests:
+    name: Python 3.11 / MongoDB ${{ matrix.mongodb }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mongodb: ['6', '7']
     services:
       mongodb:
-        image: mongo:7
+        image: mongo:${{ matrix.mongodb }}
         ports:
           - 27017:27017
         options: >-
